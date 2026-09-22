@@ -2435,8 +2435,9 @@ struct SettingsView: View {
                         .pickerStyle(.segmented).labelsHidden()
                     }
                     .listRowBackground(rowBG)
-
-
+                }
+                .scrollContentBackground(.hidden)
+            }
             .tint(AppTheme.accent)
             .navigationTitle(language.text("settings.title"))
             .navigationBarTitleDisplayMode(.inline)
