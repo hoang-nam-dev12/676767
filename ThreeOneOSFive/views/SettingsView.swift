@@ -942,14 +942,10 @@ fileprivate final class WallpaperVideoPaletteSampler {
         stopTimerOnly()
         generation &+= 1
         let activeGeneration = generation
-
-        let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
+        // Sample once on start instead of looping every 0.12s to prevent severe CPU lag
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.sample(generation: activeGeneration)
         }
-        timer.tolerance = 0.04
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
-        sample(generation: activeGeneration)
     }
 
     func stop() {
@@ -1401,75 +1397,65 @@ struct CosmicBackground: View {
 
     var body: some View {
         GeometryReader { geo in
-            TimelineView(.animation) { timeline in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                ZStack {
-                    LinearGradient(
-                        colors: isDark
-                            ? [Color(red: 0.003, green: 0.006, blue: 0.014),
-                               Color(red: 0.008, green: 0.022, blue: 0.055),
-                               Color(red: 0.002, green: 0.008, blue: 0.020)]
-                            : [Color(red: 0.96, green: 0.92, blue: 1.0),
-                               Color(red: 0.82, green: 0.70, blue: 0.98),
-                               Color(red: 0.93, green: 0.88, blue: 1.0)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    .ignoresSafeArea()
+            ZStack {
+                LinearGradient(
+                    colors: isDark
+                        ? [Color(red: 0.003, green: 0.006, blue: 0.014),
+                           Color(red: 0.008, green: 0.022, blue: 0.055),
+                           Color(red: 0.002, green: 0.008, blue: 0.020)]
+                        : [Color(red: 0.96, green: 0.92, blue: 1.0),
+                           Color(red: 0.82, green: 0.70, blue: 0.98),
+                           Color(red: 0.93, green: 0.88, blue: 1.0)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
 
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.08, green: 0.52, blue: 1.0).opacity(isDark ? 0.34 : 0.24),
-                            Color.clear
-                        ],
-                        center: UnitPoint(
-                            x: 0.25 + 0.12 * sin(t * 0.22),
-                            y: 0.20 + 0.10 * cos(t * 0.18)
-                        ),
-                        startRadius: 0,
-                        endRadius: max(geo.size.width, geo.size.height) * 0.72
-                    )
-                    .ignoresSafeArea()
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.08, green: 0.52, blue: 1.0).opacity(isDark ? 0.34 : 0.24),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.25, y: 0.20),
+                    startRadius: 0,
+                    endRadius: max(geo.size.width, geo.size.height) * 0.72
+                )
+                .ignoresSafeArea()
 
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.04, green: 0.40, blue: 1.0).opacity(isDark ? 0.22 : 0.16),
-                            Color.clear
-                        ],
-                        center: UnitPoint(
-                            x: 0.82 + 0.10 * cos(t * 0.16),
-                            y: 0.76 + 0.08 * sin(t * 0.20)
-                        ),
-                        startRadius: 0,
-                        endRadius: max(geo.size.width, geo.size.height) * 0.62
-                    )
-                    .ignoresSafeArea()
+                RadialGradient(
+                    colors: [
+                        Color(red: 0.04, green: 0.40, blue: 1.0).opacity(isDark ? 0.22 : 0.16),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.82, y: 0.76),
+                    startRadius: 0,
+                    endRadius: max(geo.size.width, geo.size.height) * 0.62
+                )
+                .ignoresSafeArea()
 
-                    Canvas { context, size in
-                        let count = 90
-                        for i in 0..<count {
-                            let seed = Double(i * 7919 % 1000) / 1000.0
-                            let seed2 = Double(i * 3571 % 1000) / 1000.0
-                            let x = (seed + t * (0.004 + seed2 * 0.004)).truncatingRemainder(dividingBy: 1.0) * size.width
-                            let y = seed2 * size.height
-                            let pulse = 0.35 + 0.65 * abs(sin(t * (0.7 + seed) + seed2 * 8))
-                            let radius: CGFloat = CGFloat(0.7 + seed * 1.5)
-                            let rect = CGRect(x: x, y: y, width: radius, height: radius)
-                            context.fill(
-                                Path(ellipseIn: rect),
-                                with: .color(.white.opacity((isDark ? 0.42 : 0.28) * pulse))
-                            )
-                        }
+                Canvas { context, size in
+                    let count = 75
+                    for i in 0..<count {
+                        let seed = Double(i * 7919 % 1000) / 1000.0
+                        let seed2 = Double(i * 3571 % 1000) / 1000.0
+                        let x = seed * size.width
+                        let y = seed2 * size.height
+                        let radius: CGFloat = CGFloat(0.8 + seed * 1.5)
+                        let rect = CGRect(x: x, y: y, width: radius, height: radius)
+                        context.fill(
+                            Path(ellipseIn: rect),
+                            with: .color(.white.opacity(isDark ? (0.20 + seed * 0.35) : (0.15 + seed * 0.20)))
+                        )
                     }
-                    .ignoresSafeArea()
-
-                    // Fine HUD grid, kept inside the visual field.
-                    GridBackgroundView(
-                        spacing: 32,
-                        lineColor: Color(red: 0.08, green: 0.52, blue: 1.0).opacity(isDark ? 0.060 : 0.075)
-                    )
-                    .ignoresSafeArea()
                 }
+                .ignoresSafeArea()
+
+                // Fine HUD grid, kept inside the visual field.
+                GridBackgroundView(
+                    spacing: 32,
+                    lineColor: Color(red: 0.08, green: 0.52, blue: 1.0).opacity(isDark ? 0.060 : 0.075)
+                )
+                .ignoresSafeArea()
             }
         }
         .ignoresSafeArea()
@@ -1736,7 +1722,6 @@ struct SettingsView: View {
     @AppStorage(AppLanguage.storageKey) private var languageCode = AppLanguage.vietnamese.rawValue
 
     @ObservedObject private var appearance   = AppearanceSettings.shared
-    @ObservedObject private var wallpaperPalette = DynamicWallpaperPalette.shared
     @State private var pickedColor: Color    = AppearanceSettings.shared.resolvedBorderColor
     @ObservedObject private var audioPlayer  = ZHModzAudioPlayer.shared
     @ObservedObject private var patchFunctionSettings = PatchFunctionSettings.shared

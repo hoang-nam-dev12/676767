@@ -1769,7 +1769,6 @@ private struct DashboardView: View {
     @Environment(\.appLanguage) private var language
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var appearance  = AppearanceSettings.shared
-    @ObservedObject private var wallpaperPalette = DynamicWallpaperPalette.shared
 
     @State private var showDevInfo  = false
     @Binding var cleanerEnabled:    Bool

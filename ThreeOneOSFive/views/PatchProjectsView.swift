@@ -1399,14 +1399,7 @@ struct PatchProjectsView: View {
                             spacing: 8
                         ) {
                             ForEach(groups) { group in
-                                NavigationLink {
-                                    PatchAppDetailView(
-                                        group: group,
-                                        appearance: appearance,
-                                        patchState: patchState,
-                                        store: store
-                                    )
-                                } label: {
+                                NavigationLink(value: group) {
                                     PatchAppCard(group: group, appearance: appearance)
                                 }
                                 .buttonStyle(.plain).techButtonChrome()
@@ -1425,6 +1418,14 @@ struct PatchProjectsView: View {
             }
             .navigationTitle("Chức năng")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: PatchAppGroup.self) { group in
+                PatchAppDetailView(
+                    group: group,
+                    appearance: appearance,
+                    patchState: patchState,
+                    store: store
+                )
+            }
             .refreshable {
                 await fetcher.fetchServerFiles(force: true)
                 store.reload()
@@ -1501,23 +1502,29 @@ final class PatchToggleStore: ObservableObject {
     /// state. UserDefaults is only a persistence hint for the UI.
     func reconcile(_ items: [PatchLibraryItem]) {
         currentItems = items
-        var actualEnabled = enabledIDs
-        let ids = Set(items.map(\.id))
-        actualEnabled.subtract(ids)
-
-        for item in items {
-            if DevicePatchService.latestAppliedReceipt(projectID: item.id) != nil {
-                actualEnabled.insert(item.id)
-            } else {
-                actualEnabled.remove(item.id)
+        Task.detached(priority: .utility) { [weak self, items] in
+            guard let self else { return }
+            var receipts: [UUID: Bool] = [:]
+            for item in items {
+                receipts[item.id] = (DevicePatchService.latestAppliedReceipt(projectID: item.id) != nil)
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                var actual = self.enabledIDs
+                for (id, isApplied) in receipts {
+                    if isApplied {
+                        actual.insert(id)
+                    } else {
+                        actual.remove(id)
+                    }
+                }
+                if actual != self.enabledIDs {
+                    self.enabledIDs = actual
+                    self.persist()
+                }
+                self.refreshAutoDisableSchedules()
             }
         }
-
-        if actualEnabled != enabledIDs {
-            enabledIDs = actualEnabled
-            persist()
-        }
-        refreshAutoDisableSchedules()
     }
 
     /// Changes the real patch state, not merely the visual toggle. ON creates a
@@ -1878,73 +1885,68 @@ private struct PatchFunctionInfoSheet: View {
 
 // MARK: - App grouping
 
-enum PatchEntry: Identifiable, Hashable {
-    case installed(item: PatchLibraryItem, file: OnlineFileItem?)
-    case cloud(file: OnlineFileItem)
+struct PatchEntry: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let patchType: PatchType
+    let isInstalled: Bool
+    let installedItem: PatchLibraryItem?
+    let cloudFile: OnlineFileItem?
+    let formattedSize: String?
 
-    var id: String {
-        switch self {
-        case .installed(let item, _):
-            return item.id.uuidString
-        case .cloud(let file):
-            return "cloud_\(file.id)"
-        }
-    }
+    private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useKB, .useMB]
+        f.countStyle = .file
+        return f
+    }()
 
-    var title: String {
-        switch self {
-        case .installed(let item, let file):
-            if let file, !file.title.isEmpty {
-                return file.title
-            }
+    static func installed(item: PatchLibraryItem, file: OnlineFileItem?) -> PatchEntry {
+        let title: String = {
+            if let file, !file.title.isEmpty { return file.title }
             return PatchAppGrouping.patchDisplayTitle(for: item)
-        case .cloud(let file):
-            return file.title
-        }
-    }
-
-    var isInstalled: Bool {
-        switch self {
-        case .installed: return true
-        case .cloud: return false
-        }
-    }
-
-    var installedItem: PatchLibraryItem? {
-        switch self {
-        case .installed(let item, _): return item
-        case .cloud: return nil
-        }
-    }
-
-    var cloudFile: OnlineFileItem? {
-        switch self {
-        case .installed(_, let file): return file
-        case .cloud(let file): return file
-        }
-    }
-
-    var patchType: PatchType {
-        switch self {
-        case .installed(let item, let file):
+        }()
+        let type: PatchType = {
             if let file, let cat = PatchType.serverCategory(file.category) {
                 return cat
             }
             return PatchAppGrouping.patchType(for: item)
-        case .cloud(let file):
+        }()
+        let sizeString: String? = {
+            guard let size = file?.size, size > 0 else { return nil }
+            return byteFormatter.string(fromByteCount: Int64(size))
+        }()
+        return PatchEntry(
+            id: item.id.uuidString,
+            title: title,
+            patchType: type,
+            isInstalled: true,
+            installedItem: item,
+            cloudFile: file,
+            formattedSize: sizeString
+        )
+    }
+
+    static func cloud(file: OnlineFileItem) -> PatchEntry {
+        let type: PatchType = {
             if let cat = PatchType.serverCategory(file.category) {
                 return cat
             }
             return PatchType.classify(file.title)
-        }
-    }
-
-    var formattedSize: String? {
-        guard let size = cloudFile?.size, size > 0 else { return nil }
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(size))
+        }()
+        let sizeString: String? = {
+            guard let size = file.size, size > 0 else { return nil }
+            return byteFormatter.string(fromByteCount: Int64(size))
+        }()
+        return PatchEntry(
+            id: "cloud_\(file.id)",
+            title: file.title,
+            patchType: type,
+            isInstalled: false,
+            installedItem: nil,
+            cloudFile: file,
+            formattedSize: sizeString
+        )
     }
 
     static func == (lhs: PatchEntry, rhs: PatchEntry) -> Bool {
@@ -2542,7 +2544,6 @@ private struct PatchAppDetailView: View {
     @ObservedObject var patchState: PatchToggleStore
     @ObservedObject var store: PatchProjectStore
     @ObservedObject private var fetcher = OnlineFileFetcher.shared
-    @Namespace private var selectorNamespace
     @ObservedObject private var functionSettings = PatchFunctionSettings.shared
     @Environment(\.appLanguage) private var language
     @State private var selectedType: PatchType = .aim
@@ -2570,7 +2571,7 @@ private struct PatchAppDetailView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            GlobalBackground()
+            Color.clear.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 16) {
@@ -2745,19 +2746,12 @@ private struct PatchAppDetailView: View {
 
         ZStack(alignment: .topTrailing) {
             Button {
-                withAnimation(
-                    appearance.animationsEnabled
-                        ? .spring(response: 0.26 * appearance.animationDurationMultiplier, dampingFraction: 0.78)
-                        : nil
-                ) {
-                    selectedType = type
-                }
+                selectedType = type
             } label: {
                 ZStack {
                     if isSelected {
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .fill(accent.opacity(0.16))
-                            .matchedGeometryEffect(id: "selected-channel", in: selectorNamespace)
                     }
 
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -2782,9 +2776,6 @@ private struct PatchAppDetailView: View {
                     Image(systemName: typeIconSecondary(type))
                         .font(.system(size: 38, weight: .ultraLight))
                         .foregroundStyle(accent.opacity(isSelected ? 0.10 : 0.04))
-                        .rotationEffect(.degrees(isSelected ? 30 : 0))
-                        .scaleEffect(isSelected ? 1.12 : 1.0)
-                        .animation(.easeInOut(duration: 0.5), value: isSelected)
                         .offset(x: 18, y: -10)
 
                     VStack(spacing: 6) {
@@ -2792,12 +2783,10 @@ private struct PatchAppDetailView: View {
                             Circle()
                                 .fill(accent.opacity(isSelected ? 0.22 : 0.08))
                                 .frame(width: 48, height: 48)
-                                .blur(radius: 4)
 
                             Image(systemName: typeIconName(type))
                                 .font(.system(size: 22, weight: .bold))
                                 .foregroundStyle(accent)
-                                .shadow(color: accent.opacity(0.75), radius: isSelected ? 8 : 3)
                         }
 
                         Text(type.rawValue.uppercased())
@@ -2814,7 +2803,6 @@ private struct PatchAppDetailView: View {
                             Capsule()
                                 .fill(accent)
                                 .frame(width: 28, height: 2.5)
-                                .shadow(color: accent.opacity(0.90), radius: 5)
                             Spacer()
                         }
                         .padding(.top, 0)
@@ -2834,10 +2822,8 @@ private struct PatchAppDetailView: View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(Color.clear, lineWidth: 0)
             }
-            .shadow(color: isSelected ? accent.opacity(0.35) : .clear, radius: 14, y: 4)
-            .scaleEffect(isSelected ? 1.025 : 1.0)
+            .shadow(color: isSelected ? accent.opacity(0.25) : .clear, radius: 8, y: 3)
             .opacity(visualOpacity)
-            .animation(.spring(response: 0.28, dampingFraction: 0.80), value: isSelected)
 
             .padding(7)
             .accessibilityLabel("Thông tin \(type.rawValue)")
@@ -2864,10 +2850,9 @@ private struct PatchAppDetailView: View {
                     .padding(.vertical, 20)
             } else {
                 ForEach(selectedEntries) { entry in
-                    switch entry {
-                    case .installed(let item, _):
-                        patchRequirementRow(item)
-                    case .cloud(let file):
+                    if entry.isInstalled, let item = entry.installedItem {
+                        patchRequirementRow(item, entry: entry)
+                    } else if let file = entry.cloudFile {
                         cloudPatchRow(file, entry: entry)
                     }
                 }
@@ -2875,10 +2860,10 @@ private struct PatchAppDetailView: View {
         }
     }
 
-    private func patchRequirementRow(_ item: PatchLibraryItem) -> some View {
+    private func patchRequirementRow(_ item: PatchLibraryItem, entry: PatchEntry) -> some View {
         let busy = patchState.isBusy(item)
         let enabled = patchState.isEnabled(item)
-        let itemType = PatchAppGrouping.patchType(for: item)
+        let itemType = entry.patchType
         let visualOpacity = functionSettings.opacity(for: itemType)
 
         return HStack(spacing: 12) {
@@ -2892,7 +2877,7 @@ private struct PatchAppDetailView: View {
                 )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(PatchAppGrouping.patchDisplayTitle(for: item))
+                Text(entry.title)
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
@@ -3073,13 +3058,6 @@ private struct PatchAppDetailView: View {
             .disabled(isDownloading)
         }
         .padding(12)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard !isDownloading else { return }
-            Task {
-                await downloadPatch(file: file)
-            }
-        }
         .background {
             RoundedRectangle(
                 cornerRadius: appearance.appButtonStyle.cornerRadius(16),
