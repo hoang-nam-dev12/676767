@@ -1526,38 +1526,10 @@ struct GlobalBackground: View {
     }
 }
 
-// MARK: - REQ 4: DevInfoPopup — "Thông tin DEV APP" bottom sheet
 struct DevInfoPopup: View {
     @Binding var isPresented: Bool
-    @ObservedObject private var appearance = AppearanceSettings.shared
-
-    private var transparency: Double { min(max(appearance.dynamicOpacity, 0.05), 1.0) }
-
     var body: some View {
-        ZStack(alignment: .bottom) {
-            // Transparent hit-test backdrop. No fixed black layer is introduced;
-            // the Developer panel itself owns all blur/transparency visuals.
-            Color.clear
-                .contentShape(Rectangle())
-                .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation(.interactiveSpring(response: 0.42, dampingFraction: 0.88, blendDuration: 0.16)) {
-                        isPresented = false
-                    }
-                }
-
-            DeveloperInfoContent {
-                withAnimation(.interactiveSpring(response: 0.42, dampingFraction: 0.88, blendDuration: 0.16)) {
-                    isPresented = false
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 66)
-            .frame(maxWidth: 760)
-            .padding(.top, 12)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
-        .ignoresSafeArea()
+        EmptyView()
     }
 }
 

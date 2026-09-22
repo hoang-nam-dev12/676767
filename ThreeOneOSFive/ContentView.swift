@@ -469,17 +469,7 @@ struct KeyActivationView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .overlay {
-            if showDevMenu {
-                DevInfoPopup(isPresented: $showDevMenu)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal:   .move(edge: .bottom).combined(with: .opacity)
-                    ))
-                    .zIndex(100)
-            }
-        }
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: showDevMenu)
+
         .animation(.easeOut(duration: 0.20), value: authManager.isAuthenticating)
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: authManager.errorMessage)
         .onAppear {
@@ -572,10 +562,8 @@ struct KeyActivationView: View {
             .padding(.horizontal, 30)
             .padding(.vertical, 24)
 
-            // ─ Developer Info (below card, matches .foot) ─
-            DeveloperInfoCard {
-                withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) { showDevMenu = true }
-            }
+            // ─ NDM PROXY Icon ─
+            DeveloperInfoCard()
             .padding(.horizontal, 30)
             .padding(.bottom, 30)
             .opacity(appeared ? 1 : 0)
@@ -1874,12 +1862,8 @@ private struct DashboardView: View {
                         keyInfoCard
                             .opacity(card3Appear ? 1 : 0).offset(y: card3Appear ? 0 : 20)
 
-                        // Developer Info
-                        DeveloperInfoCard {
-                            withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
-                                showDevInfo = true
-                            }
-                        }
+                        // NDM PROXY Icon
+                        DeveloperInfoCard()
                         .padding(.horizontal, 20)
                         .opacity(card4Appear ? 1 : 0)
                         .offset(y: card4Appear ? 0 : 20)
@@ -1890,18 +1874,7 @@ private struct DashboardView: View {
                 }
                 .zIndex(1)
 
-                // REQ 4: DevInfoPopup overlay
-                if showDevInfo {
-                    DevInfoPopup(isPresented: $showDevInfo)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal:   .move(edge: .bottom).combined(with: .opacity)
-                        ))
-                        .zIndex(200)
-                }
-
             }
-            .animation(.spring(response: 0.38, dampingFraction: 0.80), value: showDevInfo)
             // REQ 6: no "3105" navigation title
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
