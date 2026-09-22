@@ -2155,7 +2155,7 @@ enum PatchAppGrouping {
             }
         }
 
-        let result = buckets.compactMap { key, groupedEntries in
+        let result: [PatchAppGroup] = buckets.compactMap { key, groupedEntries -> PatchAppGroup? in
             guard let kind = kinds[key], let name = names[key] else { return nil }
             let sortedEntries = groupedEntries.sorted {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
@@ -2169,7 +2169,7 @@ enum PatchAppGrouping {
                 kind: kind
             )
         }
-        .sorted { lhs, rhs in
+        .sorted { (lhs: PatchAppGroup, rhs: PatchAppGroup) -> Bool in
             let order: [PatchAppKind] = [.ffth, .ffm, .capcut, .pubg, .lienQuan, .locket, .other]
             let li = order.firstIndex(of: lhs.kind) ?? order.count
             let ri = order.firstIndex(of: rhs.kind) ?? order.count
