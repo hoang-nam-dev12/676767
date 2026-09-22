@@ -433,7 +433,8 @@ struct AppLogo: View {
 
     var body: some View {
         Group {
-            if let icon = UIImage(named: "AppIcon60x60")
+            if let icon = UIImage(named: "NDMLogo")
+                ?? UIImage(named: "AppIcon60x60")
                 ?? Bundle.main.path(forResource: "AppIcon60x60@2x", ofType: "png").flatMap(UIImage.init(contentsOfFile:))
                 ?? UIImage(named: "AppIcon") {
                 Image(uiImage: icon)
@@ -477,7 +478,7 @@ private struct DeveloperPressStyle: ButtonStyle {
 
 struct DeveloperInfoCard: View {
     @ObservedObject private var appearance = AppearanceSettings.shared
-    let action: () -> Void
+    var action: (() -> Void)? = nil
 
     /// Single reactive source of truth for all Developer Info buttons.
     private var transparency: Double {
@@ -497,8 +498,14 @@ struct DeveloperInfoCard: View {
     }
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
+        Button {
+            if let action = action {
+                action()
+            } else if let url = URL(string: "https://t.me/dmanhchat") {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 15) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(.ultraThinMaterial)
@@ -507,57 +514,56 @@ struct DeveloperInfoCard: View {
                             RoundedRectangle(cornerRadius: 13, style: .continuous)
                                 .fill(Color.white.opacity(0.16 * transparency))
                         }
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(Color.clear, lineWidth: 0)
-                        }
 
-                    Circle()
-                        .stroke(Color.clear, lineWidth: 0)
-                        .scaleEffect(1.20)
-                        .opacity(0.65)
-                    AsyncImage(url: URL(string: "https://i.ibb.co/4wtdVv1T/IMG-8588.jpg")) { phase in
-                        if let image = phase.image {
-                            image
+                    Group {
+                        if let img = UIImage(named: "NDMLogo")
+                            ?? UIImage(named: "AppIcon60x60")
+                            ?? UIImage(named: "AppIcon") {
+                            Image(uiImage: img)
                                 .resizable()
-                                .scaledToFill()
+                                .scaledToFit()
                         } else {
-                            Image(systemName: "info.circle.fill")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundStyle(AppTheme.accent.opacity(0.70 + (0.30 * transparency)))
+                            Image(systemName: "shield.fill")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(Color.pink)
                         }
                     }
-                    .frame(width: 34, height: 34)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .shadow(color: AppTheme.accent.opacity(0.55), radius: 9)
+                    .frame(width: 42, height: 42)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .shadow(color: Color(red: 1.0, green: 0.25, blue: 0.70).opacity(0.55), radius: 8)
                 }
                 .frame(width: 48, height: 48)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Developer Info")
-                        .font(.system(size: 16, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55 + (0.40 * transparency)))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("NDM PROXY")
+                        .font(.system(size: 16, weight: .heavy, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.white, Color(red: 1.0, green: 0.72, blue: 0.88)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
 
-                    Text("NHÓM TELEGRAM")
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        .tracking(0.7)
-                        .foregroundStyle(.white.opacity(0.22 + (0.58 * transparency)))
+                    Text("KÊNH TELEGRAM · t.me/dmanhchat")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                        .foregroundStyle(.white.opacity(0.80))
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: 8)
 
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.24 + (0.52 * transparency)))
+                Image(systemName: "arrow.up.right.circle.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(Color(red: 1.0, green: 0.40, blue: 0.75))
             }
             .padding(.horizontal, 17)
             .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, minHeight: 82)
+            .frame(maxWidth: .infinity, minHeight: 78)
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    // The material alpha is driven directly by Dynamic Transparency.
                     .fill(.ultraThinMaterial)
                     .opacity(transparency)
                     .overlay {
@@ -568,18 +574,16 @@ struct DeveloperInfoCard: View {
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(
-                        borderWidth > 0 && borderOpacity > 0
-                            ? appearance.resolvedBorderColor.opacity(borderOpacity)
-                            : Color.clear,
-                        lineWidth: borderWidth
+                        Color(red: 1.0, green: 0.35, blue: 0.72).opacity(0.40),
+                        lineWidth: 1
                     )
             }
-            .shadow(color: .black.opacity(0.22 * transparency), radius: 14 * transparency, y: 7 * transparency)
+            .shadow(color: Color(red: 1.0, green: 0.25, blue: 0.65).opacity(0.18), radius: 12, y: 5)
         }
         .buttonStyle(DeveloperPressStyle())
         .animation(.easeInOut(duration: 0.24), value: transparency)
-        .accessibilityLabel("Developer Info")
-        .accessibilityHint("Open developer contact and support channels")
+        .accessibilityLabel("NDM PROXY")
+        .accessibilityHint("Mở kênh hỗ trợ Telegram")
     }
 }
 
@@ -620,8 +624,7 @@ struct DeveloperInfoContent: View {
 
     private let links: [DevLink] = [
         DevLink(icon: "person.3.fill", title: "Nhóm Telegram", subtitle: "t.me/dmanhchat", url: "https://t.me/dmanhchat"),
-        DevLink(icon: "person.crop.circle.fill", title: "Admin Telegram", subtitle: "t.me/ndmprofile", url: "https://t.me/ndmprofile"),
-        DevLink(icon: "hammer.fill", title: "DEV", subtitle: "t.me/aieqt", url: "https://t.me/aieqt")
+        DevLink(icon: "person.crop.circle.fill", title: "Admin Telegram", subtitle: "t.me/ndmprofile", url: "https://t.me/ndmprofile")
     ]
 
     var body: some View {
@@ -633,13 +636,17 @@ struct DeveloperInfoContent: View {
                 .padding(.bottom, 22)
 
             HStack(spacing: 12) {
-                Image(systemName: "info.circle.fill")
-                    .foregroundStyle(.white.opacity(0.92 + (0.06 * transparency)))
-                    .font(.system(size: 22, weight: .semibold))
+                if let img = UIImage(named: "NDMLogo") ?? UIImage(named: "AppIcon") {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
 
-                Text("Thông tin DEV APP")
+                Text("NDM PROXY")
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.90 + (0.08 * transparency)))
+                    .foregroundStyle(.white.opacity(0.95))
 
                 Spacer()
 

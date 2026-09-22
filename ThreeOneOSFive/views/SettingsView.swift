@@ -2440,31 +2440,6 @@ struct SettingsView: View {
                     }
                     .listRowBackground(rowBG)
 
-                    // Developer Info independent appearance
-                    Section("Developer Info") {
-                        settingsSliderRow(
-                            icon: "info.circle",
-                            title: "Độ trong Developer Info",
-                            valueText: String(format: "%.0f%%", appearance.developerInfoOpacity * 100),
-                            value: $appearance.developerInfoOpacity,
-                            range: 0.05...1.0
-                        )
-                        settingsSliderRow(
-                            icon: "square.dashed",
-                            title: "Độ sáng Viền Developer Info",
-                            valueText: String(format: "%.0f%%", appearance.developerInfoBorderOpacity * 100),
-                            value: $appearance.developerInfoBorderOpacity,
-                            range: 0...1
-                        )
-                        settingsSliderRow(
-                            icon: "line.3.horizontal",
-                            title: "Độ dày Viền Developer Info",
-                            valueText: String(format: "%.1f", appearance.developerInfoBorderWidth),
-                            value: $appearance.developerInfoBorderWidth,
-                            range: 0...4
-                        )
-                    }
-                    .listRowBackground(rowBG)
 
                     // Safe reset: only presentation settings are restored.
                     Section("Tiện ích") {
@@ -2489,108 +2464,7 @@ struct SettingsView: View {
                     }
                     .listRowBackground(rowBG)
 
-                    // 3105 repository integration — additive only.
-                    // The original FLUXCORE settings and controls remain unchanged.
-                    Section("3105 Repository") {
-                        NavigationLink {
-                            RepositoryHomeView(
-                                onOpenSettings: {},
-                                onOpenLogs: {}
-                            )
-                            .environmentObject(repositoryStore)
-                            .environmentObject(repositoryPatchStore)
-                        } label: {
-                            Label("Repository Home", systemImage: "shippingbox.fill")
-                        }
 
-                        NavigationLink {
-                            RepositorySourcesView(
-                                onOpenSettings: {},
-                                onOpenLogs: {}
-                            )
-                            .environmentObject(repositoryStore)
-                            .environmentObject(repositoryPatchStore)
-                        } label: {
-                            Label("Repository Sources", systemImage: "externaldrive.fill.badge.plus")
-                        }
-
-                        NavigationLink {
-                            LegacyRepositoryExploreView(
-                                wallpapersSupported: WallpaperFeatureSupportPolicy.isSupported(
-                                    major: AppInfo.versionTuple.major
-                                ),
-                                onOpenSettings: {},
-                                onOpenLogs: {}
-                            )
-                            .environmentObject(repositoryStore)
-                            .environmentObject(repositoryPatchStore)
-                        } label: {
-                            Label("Repository Tools", systemImage: "wrench.and.screwdriver.fill")
-                        }
-
-                        HStack {
-                            Label("Repository Packages", systemImage: "shippingbox")
-                            Spacer()
-                            Text("\(repositoryStore.packages.count)")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .listRowBackground(rowBG)
-
-                    // Device
-                    Section(language.text("common.device")) {
-                        LabeledContent(language.text("dashboard.hardware_model"), value: AppInfo.displayMachineName)
-                            .foregroundStyle(.primary)
-                        LabeledContent(language.text("settings.ios_version"),
-                                       value: "\(AppInfo.osVersion) (\(AppInfo.osBuild))")
-                            .foregroundStyle(.primary)
-                    }
-                    .listRowBackground(rowBG)
-
-                    // Compatibility
-                    Section {
-                        HStack {
-                            Text(language.text("settings.current_version")).foregroundStyle(.primary)
-                            Spacer()
-                            Text(language.text(appState.isSupported ? "settings.supported" : "settings.unsupported"))
-                                .foregroundStyle(appState.isSupported ? Color.green : Color.red)
-                        }
-                        LabeledContent("iOS 17", value: ExploitSupportPolicy.verifiedIOS17Range).foregroundStyle(.primary)
-                        LabeledContent("iOS 18", value: ExploitSupportPolicy.verifiedIOS18Range).foregroundStyle(.primary)
-                        LabeledContent("iOS 26", value: ExploitSupportPolicy.verifiedIOS26Range).foregroundStyle(.primary)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("iOS 27.0").font(.body).foregroundStyle(.primary)
-                            ForEach(ExploitSupportPolicy.verifiedIOS27Builds, id: \.build) { v in
-                                Text(versionLabel(v)).font(.caption.monospaced()).foregroundStyle(.secondary)
-                            }
-                        }.padding(.vertical, 2)
-                    } header: {
-                        Text(language.text("settings.verified_versions"))
-                    } footer: {
-                        Text(language.text("settings.supported_versions_footer"))
-                    }
-                    .listRowBackground(rowBG)
-
-                    // Shared Developer Info component keeps homepage and settings pixel-aligned.
-                    DeveloperInfoCard {
-                        withAnimation(appearance.animationsEnabled ? .spring(response: 0.38 * appearance.animationDurationMultiplier, dampingFraction: 0.80) : nil) {
-                            showDevInfo = true
-                        }
-                    }
-                    .listRowBackground(rowBG)
-                }
-                .scrollContentBackground(.hidden)
-
-                // REQ 4: DevInfoPopup overlay
-                if showDevInfo {
-                    DevInfoPopup(isPresented: $showDevInfo)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal:   .move(edge: .bottom).combined(with: .opacity)
-                        ))
-                        .zIndex(500)
-                }
-            }
             .tint(AppTheme.accent)
             .navigationTitle(language.text("settings.title"))
             .navigationBarTitleDisplayMode(.inline)
@@ -2638,7 +2512,6 @@ struct SettingsView: View {
                     isOn: value
                 )
             }
-            .animation(appearance.animationsEnabled ? .spring(response: 0.38 * appearance.animationDurationMultiplier, dampingFraction: 0.80) : nil, value: showDevInfo)
         }
     }
 
@@ -2728,12 +2601,6 @@ struct SettingsView: View {
         .padding(.vertical, 4)
     }
 
-    private func versionLabel(_ v: (beta: Int, publicBeta: Int?, build: String)) -> String {
-        if let pb = v.publicBeta {
-            return language.text("settings.developer_public_beta_build", Int64(v.beta), Int64(pb), v.build)
-        }
-        return language.text("settings.developer_beta_build", Int64(v.beta), v.build)
-    }
 
     private func clearTempPatchCache() {
         let tmp = FileManager.default.temporaryDirectory
