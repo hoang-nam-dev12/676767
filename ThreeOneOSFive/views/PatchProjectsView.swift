@@ -2026,6 +2026,7 @@ enum PatchAppKind: String, CaseIterable {
     }
 }
 
+@MainActor
 enum PatchAppGrouping {
     private static let predefined: [(kind: PatchAppKind, name: String)] = [
         (.ffth, "FREE FIRE THƯỜNG"),
@@ -2081,7 +2082,7 @@ enum PatchAppGrouping {
                 matchedItem = localByPackageID[uuid.uuidString.lowercased()]
             }
             if matchedItem == nil, let storedPkg = ServerPatchMetadataStore.packageID(for: file) {
-                matchedItem = localByPackageID[storedPkg.uuidString.lowercased()]
+                matchedItem = localByPackageID[storedPkg.lowercased()]
             }
             if matchedItem == nil {
                 let fileIdent = normalizedCompact(URL(fileURLWithPath: file.filename).deletingPathExtension().lastPathComponent)
@@ -2184,17 +2185,17 @@ enum PatchAppGrouping {
         return [.ffth, .ffm]
     }
 
-    static func classificationName(for item: PatchLibraryItem) -> String {
+    nonisolated static func classificationName(for item: PatchLibraryItem) -> String {
         let project = item.project?.name ?? ""
         let filename = item.packageURL.deletingPathExtension().lastPathComponent
         return project.isEmpty ? filename : "\(project) \(filename)"
     }
 
-    static func patchDisplayTitle(for item: PatchLibraryItem) -> String {
+    nonisolated static func patchDisplayTitle(for item: PatchLibraryItem) -> String {
         ServerPatchMetadataStore.displayTitle(for: item)
     }
 
-    static func patchType(for item: PatchLibraryItem) -> PatchType {
+    nonisolated static func patchType(for item: PatchLibraryItem) -> PatchType {
         if let metadata = ServerPatchMetadataStore.record(for: item),
            let type = PatchType.serverCategory(metadata.category) {
             return type
@@ -3231,7 +3232,7 @@ private struct PatchAppDetailView: View {
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: appearance.appButtonStyle.cornerRadius(18), style: .continuous))
         .accessibilityLabel("Mở ứng dụng")
-        .animation(.easeInOut(duration: 0.18), value: autoPatch.isRunning)
+        .animation(.easeInOut(duration: 0.18), value: !fetcher.downloadingIDs.isEmpty)
     }
 
     private func count(for type: PatchType) -> Int {
