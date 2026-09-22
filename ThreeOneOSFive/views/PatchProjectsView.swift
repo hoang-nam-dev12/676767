@@ -11,7 +11,7 @@ private enum PatchPackagePickerPolicy {
 }
 
 // MARK: - Online file model (unchanged)
-struct OnlineFileItem: Codable, Identifiable {
+struct OnlineFileItem: Codable, Identifiable, Equatable {
     let id: String
     let title: String
     let filename: String
@@ -78,6 +78,7 @@ private enum ServerPatchMetadataStore {
     private final class MemoryCache: @unchecked Sendable {
         let lock = NSLock()
         var records: [Record]?
+        var map: [String: String]?
     }
 
     private static let storageKey = "PatchProjects.serverMetadata.v1"
@@ -85,13 +86,23 @@ private enum ServerPatchMetadataStore {
     private static let memoryCache = MemoryCache()
 
     private static func loadMap() -> [String: String] {
-        UserDefaults.standard.dictionary(forKey: packageIDMapKey) as? [String: String] ?? [:]
+        memoryCache.lock.lock()
+        defer { memoryCache.lock.unlock() }
+        if let map = memoryCache.map {
+            return map
+        }
+        let map = UserDefaults.standard.dictionary(forKey: packageIDMapKey) as? [String: String] ?? [:]
+        memoryCache.map = map
+        return map
     }
 
     private static func saveMapping(serverID: String, packageID: String) {
         var map = loadMap()
         map[serverID] = packageID
         map[packageID] = serverID
+        memoryCache.lock.lock()
+        memoryCache.map = map
+        memoryCache.lock.unlock()
         UserDefaults.standard.set(map, forKey: packageIDMapKey)
     }
 
@@ -271,7 +282,7 @@ final class OnlineFileFetcher: ObservableObject {
     private var localPackageIDByIdentity: [String: String] = [:]
     private var hasPreparedLocalIndex = false
     private var lastFetchDate: Date?
-    private let minFetchInterval: TimeInterval = 180 // 3 minutes
+    private let minFetchInterval: TimeInterval = 600 // 10 minutes
 
     private lazy var manifestSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -302,6 +313,7 @@ final class OnlineFileFetcher: ObservableObject {
     }
 
     func fetchServerFiles(force: Bool = false) async {
+        guard !isLoading else { return }
         if !force, let last = lastFetchDate, Date().timeIntervalSince(last) < minFetchInterval, !onlineFiles.isEmpty {
             log("online-files: skipped fetch, cached manifest still fresh")
             return
@@ -1418,17 +1430,7 @@ struct PatchProjectsView: View {
                 store.reload()
             }
             .task {
-                store.reload()
                 await fetcher.fetchServerFiles()
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: UIApplication.didBecomeActiveNotification
-                )
-            ) { _ in
-                Task {
-                    await fetcher.fetchServerFiles()
-                }
             }
         }
     }
@@ -1694,9 +1696,11 @@ final class PatchToggleStore: ObservableObject {
                     return
                 }
 
-                self.remainingSeconds[projectID] = remaining
+                if self.remainingSeconds[projectID] != remaining {
+                    self.remainingSeconds[projectID] = remaining
+                }
                 do {
-                    try await Task.sleep(nanoseconds: 100_000_000)
+                    try await Task.sleep(nanoseconds: 500_000_000)
                 } catch {
                     return
                 }
@@ -2037,10 +2041,19 @@ enum PatchAppGrouping {
         (.locket, "LOCKET")
     ]
 
+    @MainActor private static var cachedItems: [PatchLibraryItem] = []
+    @MainActor private static var cachedOnlineFiles: [OnlineFileItem] = []
+    @MainActor private static var cachedGroups: [PatchAppGroup] = []
+
+    @MainActor
     static func makeGroups(
         from items: [PatchLibraryItem],
-        onlineFiles: [OnlineFileItem] = OnlineFileFetcher.shared.onlineFiles
+        onlineFiles: [OnlineFileItem]? = nil
     ) -> [PatchAppGroup] {
+        let activeFiles = onlineFiles ?? OnlineFileFetcher.shared.onlineFiles
+        if !cachedGroups.isEmpty && cachedItems == items && cachedOnlineFiles == activeFiles {
+            return cachedGroups
+        }
         var buckets: [String: [PatchEntry]] = [:]
         var kinds: [String: PatchAppKind] = [:]
         var names: [String: String] = [:]
@@ -2076,7 +2089,7 @@ enum PatchAppGrouping {
         var resolvedEntries: [(kinds: [PatchAppKind], entry: PatchEntry)] = []
 
         // Process online files first so metadata and categorization from server are prioritized
-        for file in onlineFiles {
+        for file in activeFiles {
             var matchedItem: PatchLibraryItem?
             if let rawPkg = file.packageID, let uuid = UUID(uuidString: rawPkg) {
                 matchedItem = localByPackageID[uuid.uuidString.lowercased()]
@@ -2142,7 +2155,7 @@ enum PatchAppGrouping {
             }
         }
 
-        return buckets.compactMap { key, groupedEntries in
+        let result = buckets.compactMap { key, groupedEntries in
             guard let kind = kinds[key], let name = names[key] else { return nil }
             let sortedEntries = groupedEntries.sorted {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
@@ -2163,6 +2176,11 @@ enum PatchAppGrouping {
             if li != ri { return li < ri }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
+
+        cachedItems = items
+        cachedOnlineFiles = activeFiles
+        cachedGroups = result
+        return result
     }
 
     private static func kindsForFile(_ file: OnlineFileItem) -> [PatchAppKind] {

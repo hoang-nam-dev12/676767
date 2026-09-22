@@ -1723,6 +1723,9 @@ final class AutoPatchEngine: ObservableObject {
 
     func trigger() {
         guard !isRunning else { return }
+        if hasCompleted && fetcher.lastFetchSucceeded && !fetcher.onlineFiles.isEmpty {
+            return
+        }
         Task { @MainActor [weak self] in
             await self?.run()
         }

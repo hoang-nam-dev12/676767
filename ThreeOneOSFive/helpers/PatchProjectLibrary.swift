@@ -1,6 +1,6 @@
 import Foundation
 
-struct PatchLibraryItem: Identifiable, Sendable {
+struct PatchLibraryItem: Identifiable, Sendable, Equatable {
     let summary: PatchPackageSummary
     var project: PatchProject?
     var contentKey: Data?
@@ -11,6 +11,13 @@ struct PatchLibraryItem: Identifiable, Sendable {
     var workspaceURL: URL? {
         PatchWorkspaceService.workspaceURL(projectID: id)
     }
+
+    static func == (lhs: PatchLibraryItem, rhs: PatchLibraryItem) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.packageURL == rhs.packageURL &&
+        lhs.project?.updatedAt == rhs.project?.updatedAt &&
+        lhs.isLocked == rhs.isLocked
+    }
 }
 
 struct PatchPasswordRequest: Identifiable, Sendable {
@@ -19,6 +26,23 @@ struct PatchPasswordRequest: Identifiable, Sendable {
 }
 
 enum PatchProjectLibrary {
+    private final class ItemMemoryCache: @unchecked Sendable {
+        let lock = NSLock()
+        var items: [String: (modDate: Date?, fileSize: Int?, item: PatchLibraryItem)] = [:]
+    }
+
+    private static let itemCache = ItemMemoryCache()
+
+    static func invalidateCache(for url: URL? = nil) {
+        itemCache.lock.lock()
+        defer { itemCache.lock.unlock() }
+        if let url {
+            itemCache.items.removeValue(forKey: url.standardizedFileURL.path)
+        } else {
+            itemCache.items.removeAll()
+        }
+    }
+
     static func packageRootURL(fileManager: FileManager = .default) throws -> URL {
         let base = try fileManager.url(
             for: .applicationSupportDirectory,
@@ -47,7 +71,26 @@ enum PatchProjectLibrary {
               ) else { return [] }
 
         var byID: [UUID: PatchLibraryItem] = [:]
+        var validPaths = Set<String>()
+
         for url in urls where url.pathExtension.lowercased() == "3105" {
+            let path = url.standardizedFileURL.path
+            validPaths.insert(path)
+
+            let resourceValues = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let modDate = resourceValues?.contentModificationDate
+            let fileSize = resourceValues?.fileSize
+
+            itemCache.lock.lock()
+            if let cached = itemCache.items[path],
+               cached.modDate == modDate,
+               cached.fileSize == fileSize {
+                itemCache.lock.unlock()
+                byID[cached.item.summary.packageID] = cached.item
+                continue
+            }
+            itemCache.lock.unlock()
+
             do {
                 let data = try readPackage(at: url)
                 let summary = try PatchPackageCodec.inspect(data)
@@ -72,11 +115,22 @@ enum PatchProjectLibrary {
                         log("patch: workspace unavailable for \(project.id.uuidString)")
                     }
                 }
+
+                itemCache.lock.lock()
+                itemCache.items[path] = (modDate, fileSize, item)
+                itemCache.lock.unlock()
+
                 byID[summary.packageID] = item
             } catch {
                 log("patch: skipped invalid local package \(url.lastPathComponent)")
             }
         }
+
+        // Clean up deleted items from memory cache
+        itemCache.lock.lock()
+        itemCache.items = itemCache.items.filter { validPaths.contains($0.key) }
+        itemCache.lock.unlock()
+
         return byID.values.sorted {
             ($0.project?.updatedAt ?? .distantPast) > ($1.project?.updatedAt ?? .distantPast)
         }
@@ -157,6 +211,7 @@ enum PatchProjectLibrary {
             )
         }
         try data.write(to: destination, options: [.atomic, .completeFileProtection])
+        invalidateCache(for: destination)
         return destination
     }
 
@@ -244,6 +299,7 @@ enum PatchProjectLibrary {
     }
 
     static func delete(_ item: PatchLibraryItem, fileManager: FileManager = .default) throws {
+        invalidateCache(for: item.packageURL)
         if fileManager.fileExists(atPath: item.packageURL.path) {
             try fileManager.removeItem(at: item.packageURL)
         }
