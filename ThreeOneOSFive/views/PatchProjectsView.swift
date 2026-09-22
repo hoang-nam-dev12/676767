@@ -1504,10 +1504,11 @@ final class PatchToggleStore: ObservableObject {
         currentItems = items
         Task.detached(priority: .utility) { [weak self, items] in
             guard let self else { return }
-            var receipts: [UUID: Bool] = [:]
+            var calculated: [UUID: Bool] = [:]
             for item in items {
-                receipts[item.id] = (DevicePatchService.latestAppliedReceipt(projectID: item.id) != nil)
+                calculated[item.id] = (DevicePatchService.latestAppliedReceipt(projectID: item.id) != nil)
             }
+            let receipts = calculated
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 var actual = self.enabledIDs
