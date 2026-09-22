@@ -30,7 +30,7 @@ actor AssetPreloadService {
             .init(key: "background.static", url: URL(string: AppearanceSettings.BackgroundMode.animeStaticVideoURL)!, fileExtension: "mov"),
             .init(key: "background.dynamic", url: URL(string: AppearanceSettings.BackgroundMode.animeDynamicVideoURL)!, fileExtension: "mp4"),
             .init(key: "home.cover", url: URL(string: "https://www.image2url.com/r2/default/files/1790007520502-b6c3841b-1960-41fc-9ee2-76d4c3d44358.jpg")!, fileExtension: "jpg"),
-            .init(key: "audio.background", url: URL(string: "https://www.image2url.com/r2/default/audio/1787540835956-e0b3ebb8-d327-4e8e-8b4b-0f19c86a60d3.mp3")!, fileExtension: "mp3")
+            .init(key: "audio.background", url: URL(string: "https://www.image2url.com/r2/default/files/1790007348399-b69ab7ff-1a62-4dca-98f6-91c724c62e20.mp3")!, fileExtension: "mp3")
         ]
     }
 
@@ -40,8 +40,11 @@ actor AssetPreloadService {
     }
 
     private func destination(for asset: RemoteAsset) -> URL {
-        cacheDirectory.appendingPathComponent(
-            "\(asset.key.replacingOccurrences(of: ".", with: "_")).\(asset.fileExtension)"
+        let filename = asset.key == "audio.background"
+            ? "audio_background_v3"
+            : asset.key.replacingOccurrences(of: ".", with: "_")
+        return cacheDirectory.appendingPathComponent(
+            "\(filename).\(asset.fileExtension)"
         )
     }
 
@@ -54,6 +57,13 @@ actor AssetPreloadService {
     func preloadAll() async {
         do {
             try fm.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            // Purge legacy audio files to ensure only the updated music plays
+            for legacy in ["audio_background.mp3", "audio_background_v2.mp3", "audio_background.wav", "audio_background.m4a"] {
+                let legacyURL = cacheDirectory.appendingPathComponent(legacy)
+                if fm.fileExists(atPath: legacyURL.path) {
+                    try? fm.removeItem(at: legacyURL)
+                }
+            }
         } catch {
             log("asset-cache: cannot create cache directory: \(error.localizedDescription)")
             return
@@ -177,7 +187,7 @@ actor AssetPreloadService {
             "background.static": "background_static.mov",
             "background.dynamic": "background_dynamic.mp4",
             "home.cover": "home_cover.jpg",
-            "audio.background": "audio_background.mp3"
+            "audio.background": "audio_background_v3.mp3"
         ]
         guard let name = mapping[key] else { return nil }
         let url = directory.appendingPathComponent(name)

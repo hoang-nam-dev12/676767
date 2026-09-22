@@ -105,10 +105,9 @@ struct ThreeOneOSFiveApp: App {
     init() {
         setupLogCapture()
         log("app: Duy Mạnh Store launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
-        // Restore the user's last music preference instead of forcing playback.
-        if FluxCoreAudioPlayer.shared.shouldPlayOnLaunch {
-            FluxCoreAudioPlayer.shared.play()
-        }
+        // Playback starts after AssetPreloadService has resolved the cached
+        // audio file. Starting here streamed the same track while startup was
+        // downloading it again, increasing launch traffic and occasional lag.
     }
 
     private var language: AppLanguage {
@@ -249,6 +248,9 @@ final class StartupResourceLoader: ObservableObject {
             detail: "Icon, hình nền động và video cần thiết"
         )
         await AssetPreloadService.shared.preloadAll()
+        if FluxCoreAudioPlayer.shared.shouldPlayOnLaunch {
+            FluxCoreAudioPlayer.shared.play()
+        }
 
         let dynamicAssetResult = await DynamicAssetSyncService.shared.sync()
         if !dynamicAssetResult.failed.isEmpty {
@@ -279,8 +281,8 @@ final class StartupResourceLoader: ObservableObject {
 
         // Không tải manifest và toàn bộ file .3105 trong startup gate. Việc đó
         // từng làm ứng dụng bị giữ ở màn hình mở đầu khi tunnel chậm hoặc một
-        // patch tạm thời lỗi. AutoPatchEngine sẽ đồng bộ đúng một lần khi người
-        // dùng mở khu vực Patch; thư viện cục bộ vẫn được kiểm tra ở trên.
+        // patch tạm thời lỗi. AutoPatchEngine đồng bộ nền khi người dùng mở khu
+        // vực Patch, khi app hoạt động lại và định kỳ trong lúc màn hình còn mở.
         setProgress(
             0.88,
             status: "Patch cục bộ đã sẵn sàng",

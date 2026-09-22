@@ -37,7 +37,9 @@ final class PatchProjectStore: ObservableObject {
 
     private var pendingUnlock: PendingUnlock?
 
-    init() {}
+    init() {
+        reload()
+    }
 
     func reload() {
         items = PatchProjectLibrary.load()
@@ -117,6 +119,7 @@ final class PatchProjectStore: ObservableObject {
             return false
         }
 
+        reload()
         return items.contains { $0.id == expectedID && $0.project != nil }
     }
 
@@ -142,6 +145,7 @@ final class PatchProjectStore: ObservableObject {
             return false
         }
 
+        reload()
         return items.contains { $0.id == expectedID && $0.project != nil }
     }
 

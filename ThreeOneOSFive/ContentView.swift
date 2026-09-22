@@ -1116,6 +1116,8 @@ struct ContentView: View {
         .onAppear {
             tabNavigation.reconcileSelection(with: featureVisibility)
             AppTabNavigationStore.save(tabNavigation)
+            AutoPatchEngine.shared.configure(store: repositoryPatchStore)
+            AutoPatchEngine.shared.trigger()
             Task { @MainActor in
                 let loaded = await runtimeConfig.refresh()
                 guard loaded else {
@@ -1750,18 +1752,9 @@ final class AutoPatchEngine: ObservableObject {
         totalCount = 0
         defer { isRunning = false }
 
-        // Always refresh the server manifest. Keeping a permanent in-memory
-        // manifest caused newly uploaded/public patches to remain invisible
-        // until the application was relaunched. Local packages are still reused
-        // by preloadAllPatches(), so refreshing the manifest does not redownload
-        // packages that are already installed.
-        for attempt in 1...2 {
-            await fetcher.fetchServerFiles()
-            if fetcher.lastFetchSucceeded { break }
-            if attempt < 2 {
-                try? await Task.sleep(for: .milliseconds(650))
-            }
-        }
+        // Always refresh the server manifest. OnlineFileFetcher owns retry and
+        // no-cache behavior so manual and automatic refreshes behave identically.
+        await fetcher.fetchServerFiles()
 
         guard fetcher.lastFetchSucceeded else {
             failedCount = 1
@@ -1803,15 +1796,20 @@ final class AutoPatchEngine: ObservableObject {
                 self.completedCount = completed
                 self.failedCount = failed
             },
-            itemResult: { file, ok in
+            itemResult: { [weak self] file, ok in
                 PatchDownloadBannerCoordinator.shared.update(
                     id: file.id,
                     status: ok ? .done : .failed
                 )
+                if ok {
+                    self?.store?.reload()
+                    self?.store?.refreshPresentation()
+                }
             }
         )
 
         store.reload()
+        store.refreshPresentation()
         hasCompleted = true
     }
 

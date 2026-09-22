@@ -81,27 +81,44 @@ private enum ServerPatchMetadataStore {
     }
 
     private static let storageKey = "PatchProjects.serverMetadata.v1"
+    private static let packageIDMapKey = "PatchProjects.serverPackageIDMap.v1"
     private static let memoryCache = MemoryCache()
+
+    private static func loadMap() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: packageIDMapKey) as? [String: String] ?? [:]
+    }
+
+    private static func saveMapping(serverID: String, packageID: String) {
+        var map = loadMap()
+        map[serverID] = packageID
+        map[packageID] = serverID
+        UserDefaults.standard.set(map, forKey: packageIDMapKey)
+    }
 
     static func replace(with files: [OnlineFileItem]) {
         let previous = Dictionary(uniqueKeysWithValues: load().map { ($0.serverID, $0) })
+        let map = loadMap()
         let records = files.compactMap { file -> Record? in
             guard let fresh = record(from: file) else { return nil }
-            guard fresh.packageID == nil,
-                  let associatedID = previous[file.id]?.packageID else {
-                return fresh
+            if let directID = normalizedPackageID(file.packageID) {
+                return replacingPackageID(in: fresh, with: directID)
             }
-            return replacingPackageID(in: fresh, with: associatedID)
+            if let associatedID = previous[file.id]?.packageID ?? map[file.id] {
+                return replacingPackageID(in: fresh, with: associatedID)
+            }
+            return fresh
         }
         save(records)
     }
 
     static func associate(_ file: OnlineFileItem, packageID: UUID) {
+        let idStr = packageID.uuidString.lowercased()
+        saveMapping(serverID: file.id, packageID: idStr)
         guard let fresh = record(from: file) else { return }
         var records = load()
         let associated = replacingPackageID(
             in: fresh,
-            with: packageID.uuidString.lowercased()
+            with: idStr
         )
         if let index = records.firstIndex(where: { $0.serverID == file.id }) {
             records[index] = associated
@@ -112,13 +129,22 @@ private enum ServerPatchMetadataStore {
     }
 
     static func packageID(for file: OnlineFileItem) -> String? {
-        load().first(where: { $0.serverID == file.id })?.packageID
+        if let existing = load().first(where: { $0.serverID == file.id })?.packageID {
+            return existing
+        }
+        return loadMap()[file.id]
     }
 
     static func record(for item: PatchLibraryItem) -> Record? {
         let records = load()
         let packageID = item.summary.packageID.uuidString.lowercased()
         if let exact = records.first(where: { $0.packageID == packageID }) {
+            return exact
+        }
+
+        let map = loadMap()
+        if let serverID = map[packageID],
+           let exact = records.first(where: { $0.serverID == serverID }) {
             return exact
         }
 
@@ -203,7 +229,7 @@ private enum ServerPatchMetadataStore {
 
     private static func normalizedGame(_ raw: String?) -> String? {
         guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              ["all", "ff", "ffm"].contains(value) else {
+              ["all", "ff", "ffm", "capcut", "pubg", "lienquan", "locket"].contains(value) else {
             return nil
         }
         return value
@@ -242,6 +268,17 @@ final class OnlineFileFetcher: ObservableObject {
     private var localPackageIDByIdentity: [String: String] = [:]
     private var hasPreparedLocalIndex = false
 
+    private lazy var manifestSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 35
+        config.waitsForConnectivity = true
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        config.httpMaximumConnectionsPerHost = 1
+        return URLSession(configuration: config)
+    }()
+
     private lazy var downloadSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 45
@@ -260,7 +297,7 @@ final class OnlineFileFetcher: ObservableObject {
     }
 
     func fetchServerFiles() async {
-        guard let url = manifestURL else {
+        guard let baseURL = manifestURL else {
             onlineFiles = []
             lastFetchSucceeded = false
             log("online-files: PatchCloudManifestURL is missing or invalid")
@@ -269,33 +306,77 @@ final class OnlineFileFetcher: ObservableObject {
         isLoading = true
         lastFetchSucceeded = false
         defer { isLoading = false }
-        do {
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            request.timeoutInterval = 15
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode) else {
-                throw URLError(.badServerResponse)
-            }
-            let decoded = try JSONDecoder().decode([OnlineFileItem].self, from: data)
-            var seenPackageIDs = Set<String>()
-            let activeFiles = decoded
-                .filter { $0.status }
-                .sorted { $0.created_at > $1.created_at }
-                .filter { file in
-                    guard let rawID = file.packageID,
-                          let packageID = UUID(uuidString: rawID)?.uuidString.lowercased() else {
-                        return true
-                    }
-                    return seenPackageIDs.insert(packageID).inserted
+
+        for attempt in 1...3 {
+            if Task.isCancelled { return }
+            do {
+                guard var components = URLComponents(
+                    url: baseURL,
+                    resolvingAgainstBaseURL: false
+                ) else {
+                    throw URLError(.badURL)
                 }
-            ServerPatchMetadataStore.replace(with: activeFiles)
-            onlineFiles = activeFiles
-            lastFetchSucceeded = true
-        } catch {
-            log("online-files: fetch failed – \(error.localizedDescription)")
+                var queryItems = components.queryItems ?? []
+                queryItems.removeAll { $0.name == "_sync" }
+                queryItems.append(
+                    URLQueryItem(
+                        name: "_sync",
+                        value: "\(Int(Date().timeIntervalSince1970))-\(attempt)"
+                    )
+                )
+                components.queryItems = queryItems
+                guard let requestURL = components.url else {
+                    throw URLError(.badURL)
+                }
+
+                var request = URLRequest(
+                    url: requestURL,
+                    cachePolicy: .reloadIgnoringLocalCacheData,
+                    timeoutInterval: 20
+                )
+                request.httpMethod = "GET"
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.setValue("no-cache, no-store", forHTTPHeaderField: "Cache-Control")
+                request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+
+                let (data, response) = try await manifestSession.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode) else {
+                    throw URLError(.badServerResponse)
+                }
+                let decoded = try JSONDecoder().decode([OnlineFileItem].self, from: data)
+                var seenPackageIDs = Set<String>()
+                let activeFiles = decoded
+                    .filter { $0.status }
+                    .sorted { $0.created_at > $1.created_at }
+                    .filter { file in
+                        guard let rawID = file.packageID,
+                              let packageID = UUID(uuidString: rawID)?.uuidString.lowercased() else {
+                            return true
+                        }
+                        return seenPackageIDs.insert(packageID).inserted
+                    }
+                ServerPatchMetadataStore.replace(with: activeFiles)
+                onlineFiles = activeFiles
+                lastFetchSucceeded = true
+                log("online-files: synced \(activeFiles.count) patch(es) from server")
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                log("online-files: attempt \(attempt)/3 failed – \(error.localizedDescription)")
+                if attempt < 3 {
+                    try? await Task.sleep(for: .milliseconds(450 * attempt))
+                }
+            }
         }
+    }
+
+    func recordSuccessfulImport(_ file: OnlineFileItem, packageID: UUID?) {
+        if let packageID {
+            ServerPatchMetadataStore.associate(file, packageID: packageID)
+        }
+        markServerManaged(file)
     }
 
     /// Synchronizes every active server patch for the launch gate.
@@ -390,20 +471,21 @@ final class OnlineFileFetcher: ObservableObject {
     }
 
     private func reconcileMissingServerPackages(manifest: [OnlineFileItem]) async -> Bool {
+        guard !manifest.isEmpty else { return false }
         let key = "PatchProjects.serverManagedPackageIDs.v1"
         let previous = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+        guard !previous.isEmpty else { return false }
+
         let current = Set(manifest.compactMap { file in
             normalizedPackageID(file.packageID)
                 ?? normalizedPackageID(ServerPatchMetadataStore.packageID(for: file))
         })
-        guard !previous.isEmpty else {
-            persistManagedPackageIDs(current, key: key)
+        guard !current.isEmpty else {
             return false
         }
 
         let missing = previous.subtracting(current)
         guard !missing.isEmpty else {
-            persistManagedPackageIDs(current, key: key)
             return false
         }
 
@@ -425,7 +507,8 @@ final class OnlineFileFetcher: ObservableObject {
             }
         }
 
-        persistManagedPackageIDs(current, key: key)
+        let remaining = previous.subtracting(missing)
+        persistManagedPackageIDs(remaining, key: key)
         return removedAny
     }
 
@@ -590,6 +673,9 @@ final class OnlineFileFetcher: ObservableObject {
             return false
         }
         let packageID = try? PatchPackageCodec.inspect(data).packageID
+        if let packageID {
+            ServerPatchMetadataStore.associate(file, packageID: packageID)
+        }
         let ok = await store.importPackageAndWait(
             data: data,
             password: password,
@@ -598,6 +684,7 @@ final class OnlineFileFetcher: ObservableObject {
 
         if ok, let packageID {
             ServerPatchMetadataStore.associate(file, packageID: packageID)
+            markServerManaged(file)
         }
 
         if ok && removeCacheAfterSuccess {
@@ -618,12 +705,11 @@ final class OnlineFileFetcher: ObservableObject {
             }
             let checksumKey = "PatchProjects.serverManagedSHA256.v1"
             let checksums = UserDefaults.standard.dictionary(forKey: checksumKey) as? [String: String] ?? [:]
-            // Existing installs created by older app versions have no saved
-            // fingerprint. Accept them once; markServerManaged migrates the
-            // current checksum after this successful pass.
-            guard let installedChecksum = checksums[packageID] else {
-                return true
-            }
+            // An older app may have installed this package without persisting
+            // its fingerprint. Treat that state as unknown and download once;
+            // accepting it would incorrectly mark an outdated local package as
+            // identical to the newest server revision.
+            guard let installedChecksum = checksums[packageID] else { return false }
             return installedChecksum == expectedChecksum
         }
 
@@ -1072,9 +1158,8 @@ struct OnlineFilesSheetView: View {
                 return
             }
 
-            if let packageID = try? PatchPackageCodec.inspect(data).packageID {
-                ServerPatchMetadataStore.associate(file, packageID: packageID)
-            }
+            let packageID = try? PatchPackageCodec.inspect(data).packageID
+            fetcher.recordSuccessfulImport(file, packageID: packageID)
 
             log("batch-download: imported \(finalName)")
             updateBatch(id: file.id, fraction: 1.0, status: .done)
@@ -1199,9 +1284,8 @@ struct OnlineFilesSheetView: View {
                 guard imported else {
                     throw PatchPackageError.invalidPasswordOrCorruptedPackage
                 }
-                if let packageID = try? PatchPackageCodec.inspect(data).packageID {
-                    ServerPatchMetadataStore.associate(file, packageID: packageID)
-                }
+                let packageID = try? PatchPackageCodec.inspect(data).packageID
+                fetcher.recordSuccessfulImport(file, packageID: packageID)
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) { showSuccessToast = true }
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 withAnimation(.easeOut(duration: 0.5)) { showSuccessToast = false }
@@ -1295,10 +1379,42 @@ struct PatchProjectsView: View {
             }
             .navigationTitle("Chức năng")
             .navigationBarTitleDisplayMode(.inline)
+            .refreshable {
+                AutoPatchEngine.shared.configure(store: store)
+                AutoPatchEngine.shared.trigger()
+                try? await Task.sleep(for: .milliseconds(750))
+                store.reload()
+            }
             .task {
                 // Load the local library first so existing patches are visible
-                // immediately, then start AUTO against this same store.
+                // immediately, then keep the server manifest fresh while this
+                // screen is alive. trigger() coalesces overlapping refreshes.
                 store.reload()
+                AutoPatchEngine.shared.configure(store: store)
+                AutoPatchEngine.shared.trigger()
+
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(45))
+                    guard !Task.isCancelled else { break }
+                    AutoPatchEngine.shared.configure(store: store)
+                    AutoPatchEngine.shared.trigger()
+                }
+            }
+            .onReceive(AutoPatchEngine.shared.$hasCompleted) { completed in
+                if completed {
+                    store.reload()
+                }
+            }
+            .onReceive(AutoPatchEngine.shared.$completedCount) { count in
+                if count > 0 {
+                    store.reload()
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIApplication.didBecomeActiveNotification
+                )
+            ) { _ in
                 AutoPatchEngine.shared.configure(store: store)
                 AutoPatchEngine.shared.trigger()
             }
@@ -1906,12 +2022,23 @@ enum PatchAppGrouping {
         for item: PatchLibraryItem,
         fallbackName: String
     ) -> [PatchAppKind] {
-        switch ServerPatchMetadataStore.record(for: item)?.game {
-        case "ff": return [.ffth]
-        case "ffm": return [.ffm]
-        case "all": return [.ffth, .ffm]
-        default: return [classifyKind(fallbackName)]
+        if let game = ServerPatchMetadataStore.record(for: item)?.game.lowercased() {
+            switch game {
+            case "ff": return [.ffth]
+            case "ffm": return [.ffm]
+            case "all": return [.ffth, .ffm]
+            case "capcut": return [.capcut]
+            case "pubg": return [.pubg]
+            case "lienquan": return [.lienQuan]
+            case "locket": return [.locket]
+            default: break
+            }
         }
+        let fallbackKind = classifyKind(fallbackName)
+        if fallbackKind != .other {
+            return [fallbackKind]
+        }
+        return [.ffth, .ffm]
     }
 
     private static func classifyKind(_ raw: String) -> PatchAppKind {
