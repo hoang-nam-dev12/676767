@@ -1713,14 +1713,12 @@ final class AutoPatchEngine: ObservableObject {
 
     private init() {}
 
-    private var fetcher = OnlineFileFetcher()
+    private var fetcher: OnlineFileFetcher { OnlineFileFetcher.shared }
     private weak var store: PatchProjectStore?
     private var fetchedFiles: [OnlineFileItem] = []
 
     func configure(store: PatchProjectStore) {
         self.store = store
-        // A new PatchProjectsView owns a new store. The manifest can be reused,
-        // but the import target must always be the current view's store.
     }
 
     func trigger() {
@@ -1731,7 +1729,7 @@ final class AutoPatchEngine: ObservableObject {
     }
 
     private func run() async {
-        guard let store, !isRunning else { return }
+        guard !isRunning else { return }
 
         isRunning = true
         hasCompleted = false
@@ -1740,8 +1738,7 @@ final class AutoPatchEngine: ObservableObject {
         totalCount = 0
         defer { isRunning = false }
 
-        // Always refresh the server manifest. OnlineFileFetcher owns retry and
-        // no-cache behavior so manual and automatic refreshes behave identically.
+        // Refresh server manifest (cached / throttled, no bulk download)
         await fetcher.fetchServerFiles()
 
         guard fetcher.lastFetchSucceeded else {
@@ -1752,53 +1749,10 @@ final class AutoPatchEngine: ObservableObject {
         }
 
         fetchedFiles = fetcher.onlineFiles
-        // Metadata (tên hiển thị, game, phân loại) có thể đổi mà không cần tải
-        // lại package. Báo UI vẽ lại mà không quét lại toàn bộ thư viện.
-        store.refreshPresentation()
-
+        store?.refreshPresentation()
         totalCount = fetchedFiles.count
-        guard !fetchedFiles.isEmpty else {
-            _ = await fetcher.preloadAllPatches(
-                files: [],
-                store: store,
-                progress: { _, _, _, _ in }
-            )
-            hasCompleted = true
-            return
-        }
-
-        let bannerEntries = fetchedFiles.map {
-            PatchDownloadBannerEntry(
-                id: $0.id,
-                title: $0.title,
-                status: .downloading
-            )
-        }
-        PatchDownloadBannerCoordinator.shared.show(entries: bannerEntries)
-
-        _ = await fetcher.preloadAllPatches(
-            files: fetchedFiles,
-            store: store,
-            progress: { [weak self] completed, _, failed, _ in
-                guard let self else { return }
-                self.completedCount = completed
-                self.failedCount = failed
-            },
-            itemResult: { [weak self] file, ok in
-                PatchDownloadBannerCoordinator.shared.update(
-                    id: file.id,
-                    status: ok ? .done : .failed
-                )
-                if ok {
-                    self?.store?.reload()
-                    self?.store?.refreshPresentation()
-                }
-            }
-        )
-
-        store.reload()
-        store.refreshPresentation()
         hasCompleted = true
+        log("auto-patch: synced manifest with \(fetchedFiles.count) patch(es)")
     }
 
 }

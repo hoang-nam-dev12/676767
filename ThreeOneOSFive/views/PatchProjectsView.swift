@@ -259,14 +259,19 @@ private enum ServerPatchMetadataStore {
     }
 }
 
-// MARK: - Online file fetcher (unchanged)
+// MARK: - Online file fetcher
 @MainActor
 final class OnlineFileFetcher: ObservableObject {
+    static let shared = OnlineFileFetcher()
+
     @Published var onlineFiles: [OnlineFileItem] = []
     @Published var isLoading: Bool = false
+    @Published var downloadingIDs: Set<String> = []
     private(set) var lastFetchSucceeded = false
     private var localPackageIDByIdentity: [String: String] = [:]
     private var hasPreparedLocalIndex = false
+    private var lastFetchDate: Date?
+    private let minFetchInterval: TimeInterval = 180 // 3 minutes
 
     private lazy var manifestSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -296,7 +301,12 @@ final class OnlineFileFetcher: ObservableObject {
         return URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func fetchServerFiles() async {
+    func fetchServerFiles(force: Bool = false) async {
+        if !force, let last = lastFetchDate, Date().timeIntervalSince(last) < minFetchInterval, !onlineFiles.isEmpty {
+            log("online-files: skipped fetch, cached manifest still fresh")
+            return
+        }
+
         guard let baseURL = manifestURL else {
             onlineFiles = []
             lastFetchSucceeded = false
@@ -359,6 +369,7 @@ final class OnlineFileFetcher: ObservableObject {
                 ServerPatchMetadataStore.replace(with: activeFiles)
                 onlineFiles = activeFiles
                 lastFetchSucceeded = true
+                lastFetchDate = Date()
                 log("online-files: synced \(activeFiles.count) patch(es) from server")
                 return
             } catch is CancellationError {
@@ -370,6 +381,29 @@ final class OnlineFileFetcher: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Tải một patch đơn lẻ khi người dùng yêu cầu (on-demand download)
+    func downloadSinglePatch(file: OnlineFileItem, store: PatchProjectStore) async -> Bool {
+        guard !downloadingIDs.contains(file.id) else { return false }
+        downloadingIDs.insert(file.id)
+        defer { downloadingIDs.remove(file.id) }
+
+        log("single-download: starting download for \(file.title) (\(file.filename))")
+
+        let deadline = Date().addingTimeInterval(30)
+        while store.isBusy && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+
+        let ok = await synchronizePatch(file: file, store: store)
+        if ok {
+            log("single-download: successfully imported \(file.title)")
+            store.reload()
+        } else {
+            log("single-download: failed to import \(file.title)")
+        }
+        return ok
     }
 
     func recordSuccessfulImport(_ file: OnlineFileItem, packageID: UUID?) {
@@ -1330,12 +1364,11 @@ struct PatchProjectsView: View {
     @StateObject private var store = PatchProjectStore()
     @ObservedObject private var appearance = AppearanceSettings.shared
     @StateObject private var patchState = PatchToggleStore()
+    @ObservedObject private var fetcher = OnlineFileFetcher.shared
 
-    /// Mỗi configuration không xác định được đều giữ một group riêng.
-    /// Không có group tổng hợp "Khác", vì việc gom các package khác nhau vào
-    /// cùng một bucket làm mất khả năng hiển thị configuration độc lập.
+    /// Nhóm các patch theo game/ứng dụng (hiển thị cả patch trên server và đã tải)
     private var groups: [PatchAppGroup] {
-        PatchAppGrouping.makeGroups(from: store.items)
+        PatchAppGrouping.makeGroups(from: store.items, onlineFiles: fetcher.onlineFiles)
     }
 
     var body: some View {
@@ -1358,7 +1391,8 @@ struct PatchProjectsView: View {
                                     PatchAppDetailView(
                                         group: group,
                                         appearance: appearance,
-                                        patchState: patchState
+                                        patchState: patchState,
+                                        store: store
                                     )
                                 } label: {
                                     PatchAppCard(group: group, appearance: appearance)
@@ -1380,43 +1414,21 @@ struct PatchProjectsView: View {
             .navigationTitle("Chức năng")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
-                AutoPatchEngine.shared.configure(store: store)
-                AutoPatchEngine.shared.trigger()
-                try? await Task.sleep(for: .milliseconds(750))
+                await fetcher.fetchServerFiles(force: true)
                 store.reload()
             }
             .task {
-                // Load the local library first so existing patches are visible
-                // immediately, then keep the server manifest fresh while this
-                // screen is alive. trigger() coalesces overlapping refreshes.
                 store.reload()
-                AutoPatchEngine.shared.configure(store: store)
-                AutoPatchEngine.shared.trigger()
-
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(45))
-                    guard !Task.isCancelled else { break }
-                    AutoPatchEngine.shared.configure(store: store)
-                    AutoPatchEngine.shared.trigger()
-                }
-            }
-            .onReceive(AutoPatchEngine.shared.$hasCompleted) { completed in
-                if completed {
-                    store.reload()
-                }
-            }
-            .onReceive(AutoPatchEngine.shared.$completedCount) { count in
-                if count > 0 {
-                    store.reload()
-                }
+                await fetcher.fetchServerFiles()
             }
             .onReceive(
                 NotificationCenter.default.publisher(
                     for: UIApplication.didBecomeActiveNotification
                 )
             ) { _ in
-                AutoPatchEngine.shared.configure(store: store)
-                AutoPatchEngine.shared.trigger()
+                Task {
+                    await fetcher.fetchServerFiles()
+                }
             }
         }
     }
@@ -1862,12 +1874,95 @@ private struct PatchFunctionInfoSheet: View {
 
 // MARK: - App grouping
 
+enum PatchEntry: Identifiable, Hashable {
+    case installed(item: PatchLibraryItem, file: OnlineFileItem?)
+    case cloud(file: OnlineFileItem)
+
+    var id: String {
+        switch self {
+        case .installed(let item, _):
+            return item.id.uuidString
+        case .cloud(let file):
+            return "cloud_\(file.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .installed(let item, let file):
+            if let file, !file.title.isEmpty {
+                return file.title
+            }
+            return PatchAppGrouping.patchDisplayTitle(for: item)
+        case .cloud(let file):
+            return file.title
+        }
+    }
+
+    var isInstalled: Bool {
+        switch self {
+        case .installed: return true
+        case .cloud: return false
+        }
+    }
+
+    var installedItem: PatchLibraryItem? {
+        switch self {
+        case .installed(let item, _): return item
+        case .cloud: return nil
+        }
+    }
+
+    var cloudFile: OnlineFileItem? {
+        switch self {
+        case .installed(_, let file): return file
+        case .cloud(let file): return file
+        }
+    }
+
+    var patchType: PatchType {
+        switch self {
+        case .installed(let item, let file):
+            if let file, let cat = PatchType.serverCategory(file.category) {
+                return cat
+            }
+            return PatchAppGrouping.patchType(for: item)
+        case .cloud(let file):
+            if let cat = PatchType.serverCategory(file.category) {
+                return cat
+            }
+            return PatchType.classify(file.title)
+        }
+    }
+
+    var formattedSize: String? {
+        guard let size = cloudFile?.size, size > 0 else { return nil }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(size))
+    }
+
+    static func == (lhs: PatchEntry, rhs: PatchEntry) -> Bool {
+        lhs.id == rhs.id && lhs.isInstalled == rhs.isInstalled
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(isInstalled)
+    }
+}
+
 struct PatchAppGroup: Identifiable, Hashable {
     let id: String
     let name: String
     let bundleIdentifiers: [String]
-    let items: [PatchLibraryItem]
+    let entries: [PatchEntry]
     let kind: PatchAppKind
+
+    var items: [PatchLibraryItem] {
+        entries.compactMap { $0.installedItem }
+    }
 
     var packageNames: [String] {
         items.map { $0.packageURL.lastPathComponent }
@@ -1875,17 +1970,21 @@ struct PatchAppGroup: Identifiable, Hashable {
 
     /// Free Fire categories come from the website manifest. Imported packages
     /// without server metadata retain name-based classification as a fallback.
-    func items(for type: PatchType) -> [PatchLibraryItem] {
+    func entries(for type: PatchType) -> [PatchEntry] {
         guard kind == .ffm || kind == .ffth else { return [] }
-        return items.filter {
-            PatchAppGrouping.patchType(for: $0) == type
+        return entries.filter {
+            $0.patchType == type
         }
+    }
+
+    func items(for type: PatchType) -> [PatchLibraryItem] {
+        entries(for: type).compactMap { $0.installedItem }
     }
 
     var primaryBundleID: String? { bundleIdentifiers.first }
 
     static func == (lhs: PatchAppGroup, rhs: PatchAppGroup) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id && lhs.entries == rhs.entries
     }
 
     func hash(into hasher: inout Hasher) {
@@ -1937,8 +2036,11 @@ enum PatchAppGrouping {
         (.locket, "LOCKET")
     ]
 
-    static func makeGroups(from items: [PatchLibraryItem]) -> [PatchAppGroup] {
-        var buckets: [String: [PatchLibraryItem]] = [:]
+    static func makeGroups(
+        from items: [PatchLibraryItem],
+        onlineFiles: [OnlineFileItem] = OnlineFileFetcher.shared.onlineFiles
+    ) -> [PatchAppGroup] {
+        var buckets: [String: [PatchEntry]] = [:]
         var kinds: [String: PatchAppKind] = [:]
         var names: [String: String] = [:]
         var bundles: [String: [String]] = [:]
@@ -1954,40 +2056,102 @@ enum PatchAppGrouping {
             }
         }
 
+        // Build index of local items for correlation
+        var localByPackageID: [String: PatchLibraryItem] = [:]
+        var localByIdentity: [String: PatchLibraryItem] = [:]
         for item in items {
+            let pkgID = item.summary.packageID.uuidString.lowercased()
+            localByPackageID[pkgID] = item
+
+            let fileIdent = normalizedCompact(item.packageURL.deletingPathExtension().lastPathComponent)
+            if !fileIdent.isEmpty { localByIdentity[fileIdent] = item }
+            if let projName = item.project?.name {
+                let projIdent = normalizedCompact(projName)
+                if !projIdent.isEmpty { localByIdentity[projIdent] = item }
+            }
+        }
+
+        var matchedLocalIDs = Set<UUID>()
+        var resolvedEntries: [(kinds: [PatchAppKind], entry: PatchEntry)] = []
+
+        // Process online files first so metadata and categorization from server are prioritized
+        for file in onlineFiles {
+            var matchedItem: PatchLibraryItem?
+            if let rawPkg = file.packageID, let uuid = UUID(uuidString: rawPkg) {
+                matchedItem = localByPackageID[uuid.uuidString.lowercased()]
+            }
+            if matchedItem == nil, let storedPkg = ServerPatchMetadataStore.packageID(for: file) {
+                matchedItem = localByPackageID[storedPkg.uuidString.lowercased()]
+            }
+            if matchedItem == nil {
+                let fileIdent = normalizedCompact(URL(fileURLWithPath: file.filename).deletingPathExtension().lastPathComponent)
+                matchedItem = localByIdentity[fileIdent]
+            }
+            if matchedItem == nil {
+                let titleIdent = normalizedCompact(file.title)
+                matchedItem = localByIdentity[titleIdent]
+            }
+
+            let entry: PatchEntry
+            if let matched = matchedItem {
+                matchedLocalIDs.insert(matched.id)
+                entry = .installed(item: matched, file: file)
+            } else {
+                entry = .cloud(file: file)
+            }
+
+            let fileKinds = kindsForFile(file)
+            resolvedEntries.append((fileKinds, entry))
+        }
+
+        // Process remaining local items (manual imports or offline)
+        for item in items where !matchedLocalIDs.contains(item.id) {
             let raw = classificationName(for: item)
-            for kind in targetKinds(for: item, fallbackName: raw) where kind != .other {
+            let itemKinds = targetKinds(for: item, fallbackName: raw).filter { $0 != .other }
+            let entry = PatchEntry.installed(item: item, file: nil)
+            resolvedEntries.append((itemKinds.isEmpty ? [.other] : itemKinds, entry))
+        }
+
+        // Add entries into buckets
+        for (entryKinds, entry) in resolvedEntries {
+            for kind in entryKinds {
                 let groupKey = key(for: kind)
-                if !(buckets[groupKey] ?? []).contains(where: { $0.id == item.id }) {
-                    buckets[groupKey, default: []].append(item)
+                if !(buckets[groupKey] ?? []).contains(where: { $0.id == entry.id }) {
+                    buckets[groupKey, default: []].append(entry)
                 }
                 kinds[groupKey] = kind
 
                 if names[groupKey] == nil {
-                    names[groupKey] = displayName(for: raw, item: item)
+                    names[groupKey] = kind.displayName
                 }
 
-                for bundleID in item.project?.allBundleIdentifiers ?? [] where !bundleID.isEmpty {
+                if let bundleID = kind.defaultBundleID {
                     if !(bundles[groupKey] ?? []).contains(bundleID) {
                         bundles[groupKey, default: []].append(bundleID)
+                    }
+                }
+
+                if let localItem = entry.installedItem {
+                    for bundleID in localItem.project?.allBundleIdentifiers ?? [] where !bundleID.isEmpty {
+                        if !(bundles[groupKey] ?? []).contains(bundleID) {
+                            bundles[groupKey, default: []].append(bundleID)
+                        }
                     }
                 }
             }
         }
 
-        return buckets.compactMap { key, groupedItems in
+        return buckets.compactMap { key, groupedEntries in
             guard let kind = kinds[key], let name = names[key] else { return nil }
-            let sortedItems = groupedItems.sorted {
-                patchDisplayTitle(for: $0).localizedCaseInsensitiveCompare(
-                    patchDisplayTitle(for: $1)
-                ) == .orderedAscending
+            let sortedEntries = groupedEntries.sorted {
+                $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
             }
 
             return PatchAppGroup(
                 id: key,
                 name: name,
                 bundleIdentifiers: bundles[key] ?? [],
-                items: sortedItems,
+                entries: sortedEntries,
                 kind: kind
             )
         }
@@ -1998,6 +2162,26 @@ enum PatchAppGrouping {
             if li != ri { return li < ri }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
+    }
+
+    private static func kindsForFile(_ file: OnlineFileItem) -> [PatchAppKind] {
+        if let game = file.game?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            switch game {
+            case "ff": return [.ffth]
+            case "ffm": return [.ffm]
+            case "all": return [.ffth, .ffm]
+            case "capcut": return [.capcut]
+            case "pubg": return [.pubg]
+            case "lienquan": return [.lienQuan]
+            case "locket": return [.locket]
+            default: break
+            }
+        }
+        let fallbackKind = classifyKind(file.title + " " + file.filename)
+        if fallbackKind != .other {
+            return [fallbackKind]
+        }
+        return [.ffth, .ffm]
     }
 
     static func classificationName(for item: PatchLibraryItem) -> String {
@@ -2105,7 +2289,7 @@ private struct PatchAppCard: View {
     @ObservedObject var appearance: AppearanceSettings
     @ObservedObject private var autoPatch = AutoPatchEngine.shared
 
-    private var patchCount: Int { group.items.count }
+    private var patchCount: Int { group.entries.count }
 
     @ViewBuilder
     private var appCardIcon: some View {
@@ -2167,21 +2351,21 @@ private struct PatchAppCard: View {
             if group.kind == .ffm || group.kind == .ffth {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(PatchType.allCases.filter { !group.items(for: $0).isEmpty }) { type in
-                            typeBadge(type.shortLabel, count: group.items(for: type).count)
+                        ForEach(PatchType.allCases.filter { !group.entries(for: $0).isEmpty }) { type in
+                            typeBadge(type.shortLabel, count: group.entries(for: type).count)
                         }
                     }
                 }
             }
 
             Group {
-                if autoPatch.isRunning {
+                if autoPatch.isRunning && patchCount == 0 {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(appearance.resolvedAppButtonColor)
                         .scaleEffect(0.72)
                         .frame(height: 12)
-                        .accessibilityLabel("Đang tự động tải Patch")
+                        .accessibilityLabel("Đang cập nhật danh sách")
                 } else if patchCount == 0 {
                     Text("Sẵn sàng tích hợp")
                         .font(.system(size: 9, weight: .semibold))
@@ -2337,7 +2521,8 @@ private struct PatchAppDetailView: View {
     let group: PatchAppGroup
     @ObservedObject var appearance: AppearanceSettings
     @ObservedObject var patchState: PatchToggleStore
-    @ObservedObject private var autoPatch = AutoPatchEngine.shared
+    @ObservedObject var store: PatchProjectStore
+    @ObservedObject private var fetcher = OnlineFileFetcher.shared
     @Namespace private var selectorNamespace
     @ObservedObject private var functionSettings = PatchFunctionSettings.shared
     @Environment(\.appLanguage) private var language
@@ -2345,18 +2530,23 @@ private struct PatchAppDetailView: View {
     @State private var openResult: String?
     @State private var infoTopic: PatchInfoTopic?
 
+    private var activeGroup: PatchAppGroup {
+        PatchAppGrouping.makeGroups(from: store.items, onlineFiles: fetcher.onlineFiles)
+            .first(where: { $0.id == group.id }) ?? group
+    }
+
     /// Free Fire and Free Fire MAX expose the categories selected on the web.
     /// Other applications intentionally expose their patches directly so they
     /// do not inherit the Free Fire category UI.
     private var usesFunctionChannels: Bool {
-        group.kind == .ffm || group.kind == .ffth
+        activeGroup.kind == .ffm || activeGroup.kind == .ffth
     }
 
-    private var selectedItems: [PatchLibraryItem] {
+    private var selectedEntries: [PatchEntry] {
         // Free Fire groups use the exact Patch Cloud category.
         // All other known apps (CAPCUT, PUBG, LIÊN QUÂN) expose patches directly.
-        guard usesFunctionChannels else { return group.items }
-        return group.items(for: selectedType)
+        guard usesFunctionChannels else { return activeGroup.entries }
+        return activeGroup.entries(for: selectedType)
     }
 
     var body: some View {
@@ -2381,7 +2571,7 @@ private struct PatchAppDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .zIndex(100)
         }
-        .navigationTitle(group.name)
+        .navigationTitle(activeGroup.name)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $infoTopic) { topic in
             PatchFunctionInfoSheet(topic: topic)
@@ -2397,9 +2587,9 @@ private struct PatchAppDetailView: View {
             Text(openResult ?? "Ứng dụng chưa được cài đặt hoặc không thể mở.")
         }
         .task {
-            patchState.reconcile(group.items)
-            if group.items(for: selectedType).isEmpty,
-               let firstAvailable = PatchType.allCases.first(where: { !group.items(for: $0).isEmpty }) {
+            patchState.reconcile(activeGroup.items)
+            if activeGroup.entries(for: selectedType).isEmpty,
+               let firstAvailable = PatchType.allCases.first(where: { !activeGroup.entries(for: $0).isEmpty }) {
                 selectedType = firstAvailable
             }
         }
@@ -2415,7 +2605,7 @@ private struct PatchAppDetailView: View {
 
     private var detailHeader: some View {
         // REQ 4: .other kind gets a dedicated "Khác" tech icon instead of an app icon
-        let isOther = group.kind == .other
+        let isOther = activeGroup.kind == .other
         let otherAccent = Color(red: 1.0, green: 0.72, blue: 0.10)  // amber gold for "Khác"
         let cr = appearance.appButtonStyle.cornerRadius(appearance.cardCornerRadius)
 
@@ -2443,7 +2633,7 @@ private struct PatchAppDetailView: View {
                 }
                 .shadow(color: otherAccent.opacity(0.30), radius: 12, y: 4)
             } else {
-                InstalledAppIconView(bundleID: group.primaryBundleID)
+                InstalledAppIconView(bundleID: activeGroup.primaryBundleID)
                     .frame(width: 74, height: 74)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .overlay {
@@ -2453,7 +2643,7 @@ private struct PatchAppDetailView: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(group.name)
+                Text(activeGroup.name)
                     .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 
@@ -2463,14 +2653,14 @@ private struct PatchAppDetailView: View {
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(otherAccent.opacity(0.72))
                         .lineLimit(1)
-                } else if let bundle = group.primaryBundleID {
+                } else if let bundle = activeGroup.primaryBundleID {
                     Text(bundle)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.48))
                         .lineLimit(1)
                 }
 
-                Text(group.items.isEmpty ? "Chưa có patch" : "\(group.items.count) patch")
+                Text(activeGroup.entries.isEmpty ? "Chưa có patch" : "\(activeGroup.entries.count) patch")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(isOther ? otherAccent : appearance.resolvedAppButtonColor)
             }
@@ -2644,18 +2834,23 @@ private struct PatchAppDetailView: View {
                 Spacer()
             }
 
-            if selectedItems.isEmpty {
+            if selectedEntries.isEmpty {
                 Text(
                     usesFunctionChannels
-                        ? "Chưa có patch \(selectedType.rawValue) cho \(group.name)."
-                        : "Chưa có patch cho \(group.name)."
+                        ? "Chưa có patch \(selectedType.rawValue) cho \(activeGroup.name)."
+                        : "Chưa có patch cho \(activeGroup.name)."
                 )
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.50))
                     .padding(.vertical, 20)
             } else {
-                ForEach(selectedItems) { item in
-                    patchRequirementRow(item)
+                ForEach(selectedEntries) { entry in
+                    switch entry {
+                    case .installed(let item, _):
+                        patchRequirementRow(item)
+                    case .cloud(let file):
+                        cloudPatchRow(file, entry: entry)
+                    }
                 }
             }
         }
@@ -2781,9 +2976,154 @@ private struct PatchAppDetailView: View {
         .opacity(0.35 + (0.65 * visualOpacity))
     }
 
+    private func cloudPatchRow(_ file: OnlineFileItem, entry: PatchEntry) -> some View {
+        let isDownloading = fetcher.downloadingIDs.contains(file.id)
+        let itemType = entry.patchType
+        let visualOpacity = functionSettings.opacity(for: itemType)
+        let formattedSize = entry.formattedSize
+
+        return HStack(spacing: 12) {
+            Image(systemName: "icloud.and.arrow.down")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(appearance.resolvedAppButtonColor)
+                .frame(width: 38, height: 38)
+                .background(
+                    appearance.resolvedAppButtonColor.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: appearance.appButtonStyle.cornerRadius(11), style: .continuous)
+                )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(file.title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                HStack(spacing: 6) {
+                    Text(isDownloading ? "Đang tải xuống…" : "Chưa tải về")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(isDownloading ? appearance.resolvedAppButtonColor : .white.opacity(0.42))
+
+                    if let formattedSize {
+                        Text("•")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.white.opacity(0.25))
+                        Text(formattedSize)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.42))
+                    }
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                guard !isDownloading else { return }
+                Task {
+                    await downloadPatch(file: file)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if isDownloading {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .scaleEffect(0.72)
+                    } else {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    Text(isDownloading ? "Đang tải…" : "Tải về")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(
+                    isDownloading
+                        ? Color.white.opacity(0.12)
+                        : appearance.resolvedAppButtonColor,
+                    in: Capsule()
+                )
+                .shadow(
+                    color: isDownloading ? .clear : appearance.resolvedAppButtonColor.opacity(0.35),
+                    radius: 6,
+                    y: 2
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(isDownloading)
+        }
+        .padding(12)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !isDownloading else { return }
+            Task {
+                await downloadPatch(file: file)
+            }
+        }
+        .background {
+            RoundedRectangle(
+                cornerRadius: appearance.appButtonStyle.cornerRadius(16),
+                style: .continuous
+            )
+            .fill(
+                appearance.appButtonStyle == .futuristic
+                    ? LinearGradient(
+                        colors: [
+                            appearance.resolvedAppButtonColor.opacity(0.08),
+                            Color.black.opacity(max(0.12, appearance.cardFillOpacity * 0.72))
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    : LinearGradient(
+                        colors: [
+                            Color.black.opacity(max(0.10, appearance.cardFillOpacity * 0.70)),
+                            Color.black.opacity(max(0.10, appearance.cardFillOpacity * 0.70))
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+            )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: appearance.appButtonStyle.cornerRadius(16), style: .continuous)
+                .stroke(Color.white.opacity(0.05), lineWidth: 0.5)
+        }
+        .shadow(
+            color: appearance.appButtonStyle == .futuristic
+                ? appearance.resolvedAppButtonColor.opacity(0.10 * visualOpacity)
+                : .clear,
+            radius: appearance.appButtonStyle == .futuristic ? 10 : 0,
+            y: appearance.appButtonStyle == .futuristic ? 3 : 0
+        )
+        .opacity(0.35 + (0.65 * visualOpacity))
+    }
+
+    private func downloadPatch(file: OnlineFileItem) async {
+        let ok = await fetcher.downloadSinglePatch(file: file, store: store)
+        if ok {
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.success)
+            FluxStatusNotificationCenter.shared.post(
+                title: "Đã tải patch",
+                detail: file.title,
+                isOn: true
+            )
+        } else {
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.error)
+            FluxStatusNotificationCenter.shared.post(
+                title: "Tải patch thất bại",
+                detail: file.title,
+                isOn: false
+            )
+        }
+    }
+
     private var openAppBar: some View {
         Button {
-            guard let bundleID = group.primaryBundleID,
+            guard let bundleID = activeGroup.primaryBundleID,
                   !bundleID.isEmpty else {
                 openResult = "Chức năng này chưa có package identifier của ứng dụng đích."
                 return
@@ -2793,7 +3133,7 @@ private struct PatchAppDetailView: View {
                 openResult = "Ứng dụng chưa được cài đặt hoặc LaunchServices không thể mở package này."
                 FluxStatusNotificationCenter.shared.post(
                     title: "App launch failed",
-                    detail: group.name,
+                    detail: activeGroup.name,
                     isOn: false
                 )
                 return
@@ -2801,7 +3141,7 @@ private struct PatchAppDetailView: View {
 
             FluxStatusNotificationCenter.shared.post(
                 title: "App launched",
-                detail: group.name,
+                detail: activeGroup.name,
                 isOn: true
             )
         } label: {
@@ -2819,7 +3159,7 @@ private struct PatchAppDetailView: View {
 
                 HStack {
                     Spacer()
-                    if autoPatch.isRunning {
+                    if !fetcher.downloadingIDs.isEmpty {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .tint(appearance.resolvedAppButtonColor)
